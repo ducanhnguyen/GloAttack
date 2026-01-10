@@ -1,6 +1,4 @@
-````markdown
-# How to Run
-
+This is the repository for the paper ``Generating adversarial examples based on global frequency domain to attack object detectors''
 ## Step 1: Environment Setup
 
 Open a terminal and run:
