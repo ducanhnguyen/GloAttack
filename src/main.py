@@ -363,7 +363,7 @@ if __name__ == '__main__':
     print("=" * 55 + "\n")
 
     # Run our attacks
-    if True:
+    if False:
         print(f"\n🎯 Starting attacks on {model.__class__.__name__}...")
 
         for config in GLOATTACK_CONFIGS:
@@ -425,7 +425,7 @@ if __name__ == '__main__':
         print(f"📁 Results saved in: {MODEL_TYPE}_gloattack_* folders")
 
     # Run FGSM attacks
-    if True:
+    if False:
         print(f"\n🎯 Starting FGSM attacks on {model.__class__.__name__}...")
         #EPSILON_VALUES = [0.004, 0.008, 0.012, 0.016, 0.020, 0.024]
         EPSILON_VALUES = [0.012]
@@ -481,7 +481,7 @@ if __name__ == '__main__':
         print(f"📁 Results saved in: {MODEL_TYPE}_fgsm_ep* folders")
 
     # PGD
-    if True:
+    if False:
         print(f"\n🎯 Starting PGD attacks on {model.__class__.__name__}...")
         #EPSILON_VALUES = [0.004, 0.008, 0.012, 0.016, 0.020, 0.024]
         EPSILON_VALUES = [0.008]
@@ -539,15 +539,12 @@ if __name__ == '__main__':
         print(f"📁 Results saved in: {MODEL_TYPE}_pgd_ep* folders")
 
     # Run DCT Mask attacks
-    if True:
+    if False:
         print(f"\n🎯 Starting DCT Mask attacks on {model.__class__.__name__}...")
         DCT_CONFIGS = [
-            #{'mask_type': 'low', 'eps': 0.0627, 'iters': 10},
-            {'mask_type': 'low', 'eps': 0.0627, 'iters': 50},
-            #{'mask_type': 'high', 'eps': 0.0627, 'iters': 10},
-            {'mask_type': 'high', 'eps': 0.0627, 'iters': 50},
-            #{'mask_type': 'mid', 'eps': 0.0627, 'iters': 10},
-            {'mask_type': 'mid', 'eps': 0.0627, 'iters': 50},
+            {'mask_type': 'low', 'eps': 1/255, 'iters': 1000},
+            {'mask_type': 'high', 'eps': 1/255, 'iters': 1000},
+            {'mask_type': 'mid', 'eps': 1/255, 'iters': 1000}
         ]
 
         for config in DCT_CONFIGS:
