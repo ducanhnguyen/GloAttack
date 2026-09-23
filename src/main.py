@@ -601,13 +601,9 @@ if __name__ == '__main__':
         print("\n🎉 DCT Mask attacks completed!")
 
     # Run NumbOD attacks
-    if True:
+    if False:
         print(f"\n🎯 Starting NumbOD attacks on {model.__class__.__name__}...")
         NUMOD_CONFIGS = [
-            #{'epsilon': 0.01, 'max_iters': 500, 'alpha': 0.5, 'lambda_sf': 0.5},
-            #{'epsilon': 0.03, 'max_iters': 500, 'alpha': 0.5, 'lambda_sf': 0.5},
-            #{'epsilon': 0.05, 'max_iters': 500, 'alpha': 0.5, 'lambda_sf': 0.5},
-            #{'epsilon': 0.07, 'max_iters': 500, 'alpha': 0.5, 'lambda_sf': 0.5},
             {'epsilon': 0.09, 'max_iters': 500, 'alpha': 0.5, 'lambda_sf': 0.5}
         ]
 

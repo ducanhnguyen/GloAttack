@@ -26,7 +26,7 @@ DETR_RESNET50_DC5 = "detr-resnet-50-dc5" # acebook/detr-resnet-50-dc5
 # ============================================================================
 MODEL_TYPE = YOLOV5L
 
-NUM_IMAGE = 1
+NUM_IMAGE = 1000
 SAVE_DIR = "out"
 
 ZERO_ATTACK = False
@@ -34,11 +34,6 @@ VISUALIZE_FREQUENCY=False
 EXPORT_ADV_FOLDER=False
 EXPORT_ORI_FOLDER=False
 
-ADVLOGO_CONFIGS = [
-            # {'epsilon': 0.01, 'max_iters': 500, 'interval': 1}
-            # ,
-            # {'epsilon': 0.03, 'max_iters': 500, 'interval': 1},
-            # {'epsilon': 0.05, 'max_iters': 500, 'interval': 1},
-            # {'epsilon': 0.07, 'max_iters': 500, 'interval': 1},
+GLOATTACK_CONFIGS = [
             {'epsilon': 0.09, 'max_iters': 1000, 'interval': 1},
         ]
