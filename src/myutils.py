@@ -6,6 +6,7 @@
 
 import os
 import sys
+import time
 from collections import defaultdict
 from io import BytesIO
 
@@ -375,6 +376,13 @@ def evaluate_model(ori_tensor, gt_classes, adv_tensor, model, gt_boxes):
     Wrapper function để maintain backward compatibility
     """
     return compute_map_both(ori_tensor, gt_classes, adv_tensor, model, gt_boxes)
+
+def cuda_sync_time():
+    """Wall-clock seconds after flushing GPU work (for attack-loop timing)."""
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    return time.perf_counter()
+
 
 def get_model_name(model):
     """

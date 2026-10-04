@@ -29,7 +29,11 @@ from src.attack.gloattack import gloattack
 from src.attack.gradient_based_dct4od import dct_mask
 from src.attack.numod import numod
 from src.attack.myconfig import MODEL_TYPE, NUM_IMAGE, SAVE_DIR, \
-    GLOATTACK_CONFIGS, VISUALIZE_FREQUENCY, EXPORT_ADV_FOLDER, EXPORT_ORI_FOLDER
+    GLOATTACK_CONFIGS, VISUALIZE_FREQUENCY, EXPORT_ADV_FOLDER, EXPORT_ORI_FOLDER, \
+    RUN_ALL_MODELS, RUNTIME_MODELS, MODEL_DISPLAY_NAMES, IMAGE_LIST_DIR, \
+    IMAGE_LIST_ALIASES, RUNTIME_CSV, RUNTIME_CSV_COLUMNS, \
+    RUN_OURS, RUN_DCT_HIGH, RUN_DCT_MID, RUN_DCT_LOW, RUN_FGSM, RUN_NUMOD, RUN_PGD, \
+    DCT_EPS, DCT_ITERS, FGSM_EPSILON, PGD_EPSILON, PGD_ITERS, PGD_ALPHA, NUMOD_CONFIGS
 from src.myutils import (
     deleteResultFolder,
     load_image_and_targets,
@@ -246,421 +250,224 @@ def get_csv_path(current_save_dir):
     return os.path.join(current_save_dir, f"_{folder_name}.csv")
 
 
+def load_rq1_image_ids(model_type, n):
+    """Top-n image IDs from result/rq1/1k images/<model>.txt."""
+    filename = IMAGE_LIST_ALIASES.get(model_type, f"{model_type}.txt")
+    path = os.path.join(project_root, IMAGE_LIST_DIR, filename)
+    if not os.path.exists(path):
+        fallback = os.path.join(project_root, IMAGE_LIST_DIR, f"{model_type}.txt")
+        if fallback != path and os.path.exists(fallback):
+            path = fallback
+        else:
+            raise FileNotFoundError(f"Image list not found for {model_type}: {path}")
+
+    img_ids = []
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            img_ids.append(int(line))
+            if len(img_ids) >= n:
+                break
+    print(f"📂 Loaded {len(img_ids)} image IDs from {path}")
+    return img_ids
+
+
+def mean_success_time(times):
+    if not times:
+        return ""
+    return round(float(sum(times) / len(times)), 4)
+
+
+def write_runtime_csv(runtime_rows):
+    out_path = RUNTIME_CSV if os.path.isabs(RUNTIME_CSV) else os.path.join(project_root, RUNTIME_CSV)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, mode="w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(RUNTIME_CSV_COLUMNS)
+        for row in runtime_rows:
+            writer.writerow([row.get(col, "") for col in RUNTIME_CSV_COLUMNS])
+    print(f"💾 Runtime table written: {out_path}")
+
+
+def append_csv_averages(csv_path):
+    if not (os.path.exists(csv_path) and os.path.getsize(csv_path) > 0):
+        return
+    df = pd.read_csv(csv_path)
+    if len(df) == 0 or len(df.columns) <= 2:
+        return
+    numeric_cols = df.columns[2:]
+    averages = df[numeric_cols].mean().round(4)
+    with open(csv_path, mode="a", newline="") as csv_file_append:
+        csv_writer_append = csv.writer(csv_file_append)
+        avg_row = ["AVERAGE", "summary"] + averages.tolist()
+        csv_writer_append.writerow(avg_row)
+
+
+def open_attack_csv(current_save_dir, extra_cols=None):
+    os.makedirs(current_save_dir, exist_ok=True)
+    deleteResultFolder(current_save_dir)
+    csv_path = get_csv_path(current_save_dir)
+    csv_file = open(csv_path, mode="w", newline="")
+    csv_writer = csv.writer(csv_file)
+    header = [
+        "image_id", "variant", "map_original", "map_adversarial",
+        "SSIM", "PSNR", "MS-SSIM", "FSIM", "LPIPS", "DISTS", "L0", "L2",
+    ]
+    if extra_cols:
+        header.extend(extra_cols)
+    csv_writer.writerow(header)
+    return csv_path, csv_file, csv_writer
+
+
 if __name__ == '__main__':
+    model_types = RUNTIME_MODELS if RUN_ALL_MODELS else [MODEL_TYPE]
     print("=" * 55)
-    print(f"🤖 Selected Model: {MODEL_TYPE}")
-    print(f"📊 Number of images: {NUM_IMAGE}")
+    print(f"🤖 Models: {model_types}")
+    print(f"📊 Number of images (top of 1k lists): {NUM_IMAGE}")
     print("=" * 55)
 
-    # Tạo thư mục lưu ảnh nếu chưa tồn tại
     os.makedirs(SAVE_DIR, exist_ok=True)
 
-    # Khởi tạo COCO API
     print("📁 Loading COCO dataset...")
     coco = COCO(COCO_ANNOTATION_FILE)
     all_img_ids = coco.getImgIds()
-    cat_ids = coco.getCatIds()  # Map category_id gốc COCO về index 0–79
+    cat_ids = coco.getCatIds()
     cat_id_to_index = {cat_id: i for i, cat_id in enumerate(cat_ids)}
     print(f"✅ COCO loaded: {len(all_img_ids)} images, {len(cat_ids)} categories")
 
-    # Setup device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"🔧 Device: {device}")
-    model = build_model(MODEL_TYPE, device)
-
     set_global_vars(coco, DATA_DIR, cat_id_to_index)
 
-    # Get valid images with ground-truth
-    valid_img_ids = [img_id for img_id in all_img_ids if coco.getAnnIds(imgIds=img_id)]
-    print(f"🔍 Total images with GT: {len(valid_img_ids)}/{len(all_img_ids)}")
+    runtime_rows = []
+    for mt in model_types:
+        display = MODEL_DISPLAY_NAMES.get(mt, mt)
+        row = {col: "" for col in RUNTIME_CSV_COLUMNS}
+        row["Model"] = display
+        runtime_rows.append(row)
 
-    # 🆕 ===== CACHE MECHANISM (CHỈ PHỤ THUỘC MODEL) =====
-    print("\n" + "=" * 55)
-    print("🔍 CHECKING IMAGE ID CACHE")
-    print("=" * 55)
+    write_runtime_csv(runtime_rows)
 
-    # Try load from cache first
-    cached_img_ids = load_cached_image_ids(MODEL_TYPE)
+    for model_idx, model_type in enumerate(model_types):
+        display_name = MODEL_DISPLAY_NAMES.get(model_type, model_type)
+        print("\n" + "=" * 55)
+        print(f"🤖 Model [{model_idx + 1}/{len(model_types)}]: {display_name} ({model_type})")
+        print("=" * 55)
 
-    if cached_img_ids is None or len(cached_img_ids) == 0:
-        cache_file = get_cache_filename(MODEL_TYPE)
+        sample_img_ids = load_rq1_image_ids(model_type, NUM_IMAGE)
+        print(f"✅ Ready to attack with {len(sample_img_ids)} images")
+        print(f"📋 IDs: {sample_img_ids}")
 
-        with open(cache_file, "w") as f:
-            f.write(f"# Model: {MODEL_TYPE}\n")
-            f.write(f"# Target images: {NUM_IMAGE}\n")
-            f.write(f"# Generated: {pd.Timestamp.now()}\n")
-            f.write("#" + "=" * 50 + "\n")
+        model = build_model(model_type, device)
+        row = runtime_rows[model_idx]
 
+        if RUN_OURS:
+            print(f"\n🎯 Starting attacks on {model.__class__.__name__}...")
+            for config in GLOATTACK_CONFIGS:
+                epsilon = config['epsilon']
+                max_iters = config['max_iters']
+                interval = config['interval']
+                print(f"\n⚡ Running with epsilon={epsilon}, max_iters={max_iters}")
+                current_save_dir = f"{SAVE_DIR}/{model_type}_gloattack_eps{epsilon:.4f}_iter{max_iters}"
+                csv_path, csv_file, csv_writer = open_attack_csv(
+                    current_save_dir, extra_cols=["delta_R", "delta_G", "delta_B"]
+                )
+                success, times = gloattack(
+                    model, sample_img_ids, epsilon=epsilon, max_iters=max_iters,
+                    interval=interval, csv_writer=csv_writer, save_dir=current_save_dir,
+                    visualize_frequency=VISUALIZE_FREQUENCY, exportAdvFolder=EXPORT_ADV_FOLDER,
+                    exportOriFolder=EXPORT_ORI_FOLDER)
+                print(f"✅ eps={epsilon}, iter={max_iters}: {success}/{len(sample_img_ids)} successful attacks")
+                csv_file.close()
+                append_csv_averages(csv_path)
+                mark_done(current_save_dir)
+                row["Ours"] = mean_success_time(times)
+            print("\n🎉 attacks completed!")
 
-        # Cache không tồn tại → Filter images
-        print(f"\n🔄 Starting image filtering for {MODEL_TYPE}...")
-        print(f"   Target: {NUM_IMAGE} images with mAP > 0.001")
-        print(f"   This may take several minutes...\n")
+        if RUN_DCT_HIGH or RUN_DCT_MID or RUN_DCT_LOW:
+            print(f"\n🎯 Starting DCT Mask attacks on {model.__class__.__name__}...")
+            dct_configs = []
+            if RUN_DCT_LOW:
+                dct_configs.append({'mask_type': 'low', 'eps': DCT_EPS, 'iters': DCT_ITERS, 'col': 'DCT_low'})
+            if RUN_DCT_HIGH:
+                dct_configs.append({'mask_type': 'high', 'eps': DCT_EPS, 'iters': DCT_ITERS, 'col': 'DCT_high'})
+            if RUN_DCT_MID:
+                dct_configs.append({'mask_type': 'mid', 'eps': DCT_EPS, 'iters': DCT_ITERS, 'col': 'DCT_mid'})
 
-        # Create model để filter
-        model = build_model(MODEL_TYPE, device)
+            for config in dct_configs:
+                mask_type = config['mask_type']
+                eps = config['eps']
+                iters = config['iters']
+                print(f"\n⚡ Running DCT Mask with {mask_type} frequency, eps={eps}")
+                current_save_dir = f"{SAVE_DIR}/{model_type}_dct_{mask_type}_eps{ep:.4f}_iter{iters}"
+                csv_path, csv_file, csv_writer = open_attack_csv(current_save_dir)
+                success, times = dct_mask(
+                    model, sample_img_ids, mask_type=mask_type, eps=eps, iters=iters,
+                    csv_writer=csv_writer, save_dir=current_save_dir)
+                print(f"✅ DCT Mask {mask_type}: {success}/{len(sample_img_ids)} successful attacks")
+                csv_file.close()
+                append_csv_averages(csv_path)
+                mark_done(current_save_dir)
+                row[config['col']] = mean_success_time(times)
+            print("\n🎉 DCT Mask attacks completed!")
 
-        # Filter images with non-zero mAP
-        sample_img_ids = filter_images_with_nonzero_map(
-            model, valid_img_ids, NUM_IMAGE,
-            MODEL_TYPE,
-            min_map_threshold=0.1
-        )
-
-        # Save to cache
-        print(f"✅ Cache updated incrementally during filtering")
-
-        # if len(sample_img_ids) > 0:
-        #     save_image_ids_to_cache(MODEL_TYPE, sample_img_ids)
-        #     print(f"✅ Cache saved for future runs!")
-        # else:
-        #     print(f"⚠️ No valid images found!")
-        #     exit(1)
-    else:
-        # Cache tồn tại → Sử dụng cached IDs (lấy NUM_IMAGE đầu tiên)
-        print(f"✅ Found {len(cached_img_ids)} cached image IDs")
-
-        if len(cached_img_ids) >= NUM_IMAGE:
-            sample_img_ids = cached_img_ids[:NUM_IMAGE]
-            print(f"⏩ Using first {NUM_IMAGE} images from cache")
-        else:
-            print(f"⚠️ Cache has only {len(cached_img_ids)} images, need {NUM_IMAGE}")
-            print(f"🔄 Will filter additional images...")
-
-            # Tạo model và filter thêm
-            model = build_model(MODEL_TYPE, device)
-
-            # Loại bỏ các IDs đã có trong cache
-            remaining_img_ids = [img_id for img_id in valid_img_ids
-                                 if img_id not in cached_img_ids]
-
-            # Filter thêm
-            additional_needed = NUM_IMAGE - len(cached_img_ids)
-            additional_img_ids = filter_images_with_nonzero_map(
-                model, remaining_img_ids, additional_needed,
-                MODEL_TYPE,
-                min_map_threshold=0.001
-            )
-
-            # Gộp lại
-            sample_img_ids = cached_img_ids + additional_img_ids
-
-            # Cập nhật cache
-            # if len(sample_img_ids) >= NUM_IMAGE:
-            #     save_image_ids_to_cache(MODEL_TYPE, sample_img_ids)
-            #     sample_img_ids = sample_img_ids[:NUM_IMAGE]
-            sample_img_ids = sample_img_ids[:NUM_IMAGE]
-            print("✅ Cache updated incrementally (resume-safe)")
-
-        # Tạo model sau khi đã có IDs
-        if 'model' not in locals():
-            print(f"🔧 Creating model: {MODEL_TYPE}...")
-            model = build_model(MODEL_TYPE, device)
-
-    print("=" * 55)
-    print(f"✅ Ready to attack with {len(sample_img_ids)} images")
-    print(f"📋 First 10 IDs: {sample_img_ids[:10]}")
-    print("=" * 55 + "\n")
-
-    # Run our attacks
-    if False:
-        print(f"\n🎯 Starting attacks on {model.__class__.__name__}...")
-
-        for config in GLOATTACK_CONFIGS:
-            epsilon = config['epsilon']
-            max_iters = config['max_iters']
-            interval = config['interval']
-
-            print(f"\n⚡ Running with epsilon={epsilon}, max_iters={max_iters}")
-
-            # Create save directory
-
-            current_save_dir = f"{SAVE_DIR}/{MODEL_TYPE}_gloattack_eps{epsilon}_iter{max_iters}"
-
-            os.makedirs(current_save_dir, exist_ok=True)
-            if is_done(current_save_dir):
-                print(f"⏭️  Skip (done): {current_save_dir}")
-                continue
-
-            deleteResultFolder(current_save_dir)
-
-            # Setup CSV logging
-            # csv_file = open(os.path.join(current_save_dir, "map_results.csv"), mode='w', newline='')
-            csv_path = get_csv_path(current_save_dir)
-            csv_file = open(csv_path, mode='w', newline='')
-            csv_writer = csv.writer(csv_file)
-            csv_writer.writerow([
-                "image_id", "variant", "map_original", "map_adversarial",
-                "SSIM", "PSNR", "MS-SSIM", "FSIM", "LPIPS", "DISTS", "L0", "L2",
-                "delta_R", "delta_G", "delta_B"
-            ])
-
-            success = gloattack(model, sample_img_ids, epsilon=epsilon, max_iters=max_iters,
-                                interval=interval, csv_writer=csv_writer, save_dir=current_save_dir,
-                                visualize_frequency=VISUALIZE_FREQUENCY, exportAdvFolder=EXPORT_ADV_FOLDER,
-                                exportOriFolder=EXPORT_ORI_FOLDER)
-            print(f"✅ eps={epsilon}, iter={max_iters}: {success}/{len(sample_img_ids)} successful attacks")
-
-            # === TÍNH VÀ GHI HÀNG AVERAGE ===
-            csv_file.close()
-            # csv_path = os.path.join(current_save_dir, "map_results.csv")
-            # csv_path = get_csv_path(current_save_dir)
-
-            if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
-                df = pd.read_csv(csv_path)
-                if len(df) > 0 and len(df.columns) > 2:
-                    # Tính average cho các cột từ map_original trở đi (cột thứ 2 trở đi)
-                    numeric_cols = df.columns[2:]  # Bỏ qua "image_id" và "variant"
-                    averages = df[numeric_cols].mean().round(4)
-
-                    # Mở lại file để ghi thêm hàng average
-                    with open(csv_path, mode='a', newline='') as csv_file_append:
-                        csv_writer_append = csv.writer(csv_file_append)
-                        avg_row = ["AVERAGE", "summary"] + averages.tolist()
-                        csv_writer_append.writerow(avg_row)
-            csv_file.close()
-            mark_done(current_save_dir)
-
-        print("\n🎉 attacks completed!")
-        print(f"📁 Results saved in: {MODEL_TYPE}_gloattack_* folders")
-
-    # Run FGSM attacks
-    if False:
-        print(f"\n🎯 Starting FGSM attacks on {model.__class__.__name__}...")
-        #EPSILON_VALUES = [0.004, 0.008, 0.012, 0.016, 0.020, 0.024]
-        EPSILON_VALUES = [0.012]
-        for ep in EPSILON_VALUES:
+        if RUN_FGSM:
+            print(f"\n🎯 Starting FGSM attacks on {model.__class__.__name__}...")
+            ep = FGSM_EPSILON
             print(f"\n⚡ Running FGSM with epsilon={ep}")
-
-            # Create save directory for this epsilon
-            current_save_dir = (
-                f"{SAVE_DIR}/"
-                f"{MODEL_TYPE}_fgsm_ep{ep}_iter{max_iters}"
-            )
-            os.makedirs(current_save_dir, exist_ok=True)
-            if is_done(current_save_dir):
-                print(f"⏭️  Skip (done): {current_save_dir}")
-                continue
-
-            deleteResultFolder(current_save_dir)
-
-            # Setup CSV logging
-            csv_path = get_csv_path(current_save_dir)
-            csv_file = open(csv_path, mode='w', newline='')
-            csv_writer = csv.writer(csv_file)
-            # csv_file = open(os.path.join(current_save_dir, "map_results.csv"), mode='w', newline='')
-            # csv_writer = csv.writer(csv_file)
-            csv_writer.writerow([
-                "image_id", "variant", "map_original", "map_adversarial",
-                "SSIM", "PSNR", "MS-SSIM", "FSIM", "LPIPS", "DISTS", "L0", "L2"
-            ])
-
-            success = fgsm(model, sample_img_ids, epsilon=ep, csv_writer=csv_writer, save_dir=current_save_dir)
+            current_save_dir = f"{SAVE_DIR}/{model_type}_fgsm_ep{ep:.4f}"
+            csv_path, csv_file, csv_writer = open_attack_csv(current_save_dir)
+            success, times = fgsm(
+                model, sample_img_ids, epsilon=ep, csv_writer=csv_writer, save_dir=current_save_dir)
             print(f"✅ FGSM epsilon={ep}: {success}/{len(sample_img_ids)} successful attacks")
-
-            # === TÍNH VÀ GHI HÀNG AVERAGE ===
             csv_file.close()
-            # csv_path = os.path.join(current_save_dir, "map_results.csv")
-            # csv_path = get_csv_path(current_save_dir)
-            if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
-                df = pd.read_csv(csv_path)
-                if len(df) > 0 and len(df.columns) > 2:
-                    # Tính average cho các cột từ map_original trở đi (cột thứ 2 trở đi)
-                    numeric_cols = df.columns[2:]  # Bỏ qua "image_id" và "variant"
-                    averages = df[numeric_cols].mean().round(4)
-
-                    # Mở lại file để ghi thêm hàng average
-                    with open(csv_path, mode='a', newline='') as csv_file_append:
-                        csv_writer_append = csv.writer(csv_file_append)
-                        avg_row = ["AVERAGE", "summary"] + averages.tolist()
-                        csv_writer_append.writerow(avg_row)
-            csv_file.close()
+            append_csv_averages(csv_path)
             mark_done(current_save_dir)
+            row["FGSM"] = mean_success_time(times)
+            print("\n🎉 All attacks completed!")
 
-        print("\n🎉 All attacks completed!")
-        print(f"📁 Results saved in: {MODEL_TYPE}_fgsm_ep* folders")
+        if RUN_NUMOD:
+            print(f"\n🎯 Starting NumbOD attacks on {model.__class__.__name__}...")
+            for config in NUMOD_CONFIGS:
+                epsilon = config['epsilon']
+                max_iters = config['max_iters']
+                alpha = config['alpha']
+                lambda_sf = config['lambda_sf']
+                print(f"\n⚡ Running NumbOD with epsilon={epsilon}, max_iters={max_iters}")
+                current_save_dir = f"{SAVE_DIR}/{model_type}_numod_eps{epsilon:.4f}_iter{max_iters}"
+                csv_path, csv_file, csv_writer = open_attack_csv(current_save_dir)
+                success, times = numod(
+                    model, sample_img_ids, epsilon=epsilon, max_iters=max_iters,
+                    alpha=alpha, lambda_sf=lambda_sf,
+                    csv_writer=csv_writer, save_dir=current_save_dir)
+                print(f"✅ NumbOD eps={epsilon}, iter={max_iters}: {success}/{len(sample_img_ids)} successful attacks")
+                csv_file.close()
+                append_csv_averages(csv_path)
+                mark_done(current_save_dir)
+                row["NumbOD"] = mean_success_time(times)
+            print("\n🎉 NumbOD attacks completed!")
 
-    # PGD
-    if False:
-        print(f"\n🎯 Starting PGD attacks on {model.__class__.__name__}...")
-        #EPSILON_VALUES = [0.004, 0.008, 0.012, 0.016, 0.020, 0.024]
-        EPSILON_VALUES = [0.008]
-        MAX_ITER = 100
-        for ep in EPSILON_VALUES:
-            print(f"\n⚡ Running PGD with epsilon={ep}")
-
-            # Create save directory for this epsilon
-            current_save_dir = (
-                f"{SAVE_DIR}/"
-                f"{MODEL_TYPE}_pgd_ep{ep}_iter{max_iters}"
-            )
-            os.makedirs(current_save_dir, exist_ok=True)
-            if is_done(current_save_dir):
-                print(f"⏭️  Skip (done): {current_save_dir}")
-                continue
-
-            deleteResultFolder(current_save_dir)
-
-            # Setup CSV logging
-            # csv_file = open(os.path.join(current_save_dir, "map_results.csv"), mode='w', newline='')
-            # csv_writer = csv.writer(csv_file)
-            csv_path = get_csv_path(current_save_dir)
-            csv_file = open(csv_path, mode='w', newline='')
-            csv_writer = csv.writer(csv_file)
-            csv_writer.writerow([
-                "image_id", "variant", "map_original", "map_adversarial",
-                "SSIM", "PSNR", "MS-SSIM", "FSIM", "LPIPS", "DISTS", "L0", "L2"
-            ])
-
-            success = pgd(model, sample_img_ids, epsilon=ep, alpha=0.005, num_iter=MAX_ITER, random_start=True,
-                          csv_writer=csv_writer, save_dir=current_save_dir)
+        if RUN_PGD:
+            print(f"\n🎯 Starting PGD attacks on {model.__class__.__name__}...")
+            ep = PGD_EPSILON
+            print(f"\n⚡ Running PGD with epsilon={ep}, iter={PGD_ITERS}")
+            current_save_dir = f"{SAVE_DIR}/{model_type}_pgd_ep{ep:.4f}_iter{PGD_ITERS}"
+            csv_path, csv_file, csv_writer = open_attack_csv(current_save_dir)
+            success, times = pgd(
+                model, sample_img_ids, epsilon=ep, alpha=PGD_ALPHA, num_iter=PGD_ITERS,
+                random_start=True, csv_writer=csv_writer, save_dir=current_save_dir)
             print(f"✅ PGD epsilon={ep}: {success}/{len(sample_img_ids)} successful attacks")
-
-            # === TÍNH VÀ GHI HÀNG AVERAGE ===
             csv_file.close()
-            # csv_path = os.path.join(current_save_dir, "map_results.csv")
-            # csv_path = get_csv_path(current_save_dir)
-            if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
-                df = pd.read_csv(csv_path)
-                if len(df) > 0 and len(df.columns) > 2:
-                    # Tính average cho các cột từ map_original trở đi (cột thứ 2 trở đi)
-                    numeric_cols = df.columns[2:]  # Bỏ qua "image_id" và "variant"
-                    averages = df[numeric_cols].mean().round(4)
-
-                    # Mở lại file để ghi thêm hàng average
-                    with open(csv_path, mode='a', newline='') as csv_file_append:
-                        csv_writer_append = csv.writer(csv_file_append)
-                        avg_row = ["AVERAGE", "summary"] + averages.tolist()
-                        csv_writer_append.writerow(avg_row)
-            csv_file.close()
+            append_csv_averages(csv_path)
             mark_done(current_save_dir)
+            row["PGD"] = mean_success_time(times)
+            print("\n🎉 All attacks completed!")
 
-        print("\n🎉 All attacks completed!")
-        print(f"📁 Results saved in: {MODEL_TYPE}_pgd_ep* folders")
+        write_runtime_csv(runtime_rows)
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-    # Run DCT Mask attacks
-    if False:
-        print(f"\n🎯 Starting DCT Mask attacks on {model.__class__.__name__}...")
-        DCT_CONFIGS = [
-            {'mask_type': 'low', 'eps': 1/255, 'iters': 1000},
-            {'mask_type': 'high', 'eps': 1/255, 'iters': 1000},
-            {'mask_type': 'mid', 'eps': 1/255, 'iters': 1000}
-        ]
-
-        for config in DCT_CONFIGS:
-            mask_type = config['mask_type']
-            eps = config['eps']
-            iters = config['iters']
-
-            print(f"\n⚡ Running DCT Mask with {mask_type} frequency, eps={eps}")
-
-            current_save_dir = (
-                f"{SAVE_DIR}/"
-                f"{MODEL_TYPE}_dct_{mask_type}_eps{eps}_iter{iters}"
-            )
-            os.makedirs(current_save_dir, exist_ok=True)
-            if is_done(current_save_dir):
-                print(f"⏭️  Skip (done): {current_save_dir}")
-                continue
-
-            deleteResultFolder(current_save_dir)
-
-            # csv_file = open(os.path.join(current_save_dir, "map_results.csv"), mode='w', newline='')
-            csv_path = get_csv_path(current_save_dir)
-            csv_file = open(csv_path, mode='w', newline='')
-            csv_writer = csv.writer(csv_file)
-
-            csv_writer = csv.writer(csv_file)
-            csv_writer.writerow([
-                "image_id", "variant", "map_original", "map_adversarial",
-                "SSIM", "PSNR", "MS-SSIM", "FSIM", "LPIPS", "DISTS", "L0", "L2"
-            ])
-
-            success = dct_mask(model, sample_img_ids, mask_type=mask_type, eps=eps, iters=iters,
-                               csv_writer=csv_writer, save_dir=current_save_dir)
-            print(f"✅ DCT Mask {mask_type}: {success}/{len(sample_img_ids)} successful attacks")
-
-            # === TÍNH VÀ GHI HÀNG AVERAGE ===
-            csv_file.close()
-
-            if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
-                df = pd.read_csv(csv_path)
-                if len(df) > 0 and len(df.columns) > 2:
-                    # Tính average cho các cột từ map_original trở đi (cột thứ 2 trở đi)
-                    numeric_cols = df.columns[2:]  # Bỏ qua "image_id" và "variant"
-                    averages = df[numeric_cols].mean().round(4)
-
-                    # Mở lại file để ghi thêm hàng average
-                    with open(csv_path, mode='a', newline='') as csv_file_append:
-                        csv_writer_append = csv.writer(csv_file_append)
-                        avg_row = ["AVERAGE", "summary"] + averages.tolist()
-                        csv_writer_append.writerow(avg_row)
-            csv_file.close()
-            mark_done(current_save_dir)
-
-        print("\n🎉 DCT Mask attacks completed!")
-
-    # Run NumbOD attacks
-    if False:
-        print(f"\n🎯 Starting NumbOD attacks on {model.__class__.__name__}...")
-        NUMOD_CONFIGS = [
-            {'epsilon': 0.09, 'max_iters': 500, 'alpha': 0.5, 'lambda_sf': 0.5}
-        ]
-
-        for config in NUMOD_CONFIGS:
-            epsilon = config['epsilon']
-            max_iters = config['max_iters']
-            alpha = config['alpha']
-            lambda_sf = config['lambda_sf']
-
-            print(f"\n⚡ Running NumbOD with epsilon={epsilon}, max_iters={max_iters}")
-
-            # Create save directory
-            current_save_dir = (
-                f"{SAVE_DIR}/"
-                f"{MODEL_TYPE}_numod_eps{epsilon}_iter{max_iters}"
-            )
-            os.makedirs(current_save_dir, exist_ok=True)
-            if is_done(current_save_dir):
-                print(f"⏭️  Skip (done): {current_save_dir}")
-                continue
-
-            deleteResultFolder(current_save_dir)
-
-            # Setup CSV logging
-            # csv_file = open(os.path.join(current_save_dir, "map_results.csv"), mode='w', newline='')
-            # csv_writer = csv.writer(csv_file)
-            csv_path = get_csv_path(current_save_dir)
-            csv_file = open(csv_path, mode='w', newline='')
-            csv_writer = csv.writer(csv_file)
-
-            csv_writer.writerow([
-                "image_id", "variant", "map_original", "map_adversarial",
-                "SSIM", "PSNR", "MS-SSIM", "FSIM", "LPIPS", "DISTS", "L0", "L2"
-            ])
-
-            success = numod(model, sample_img_ids, epsilon=epsilon, max_iters=max_iters,
-                            alpha=alpha, lambda_sf=lambda_sf,
-                            csv_writer=csv_writer, save_dir=current_save_dir)
-            print(f"✅ NumbOD eps={epsilon}, iter={max_iters}: {success}/{len(sample_img_ids)} successful attacks")
-
-            # === TÍNH VÀ GHI HÀNG AVERAGE ===
-            csv_file.close()
-            # csv_path = os.path.join(current_save_dir, "map_results.csv")
-            if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
-                df = pd.read_csv(csv_path)
-                if len(df) > 0 and len(df.columns) > 2:
-                    # Tính average cho các cột từ map_original trở đi (cột thứ 2 trở đi)
-                    numeric_cols = df.columns[2:]  # Bỏ qua "image_id" và "variant"
-                    averages = df[numeric_cols].mean().round(4)
-
-                    # Mở lại file để ghi thêm hàng average
-                    with open(csv_path, mode='a', newline='') as csv_file_append:
-                        csv_writer_append = csv.writer(csv_file_append)
-                        avg_row = ["AVERAGE", "summary"] + averages.tolist()
-                        csv_writer_append.writerow(avg_row)
-            csv_file.close()
-            mark_done(current_save_dir)
-
-        print("\n🎉 NumbOD attacks completed!")
-        print(f"📁 Results saved in: {MODEL_TYPE}_numod_* folders")
+    print(f"\n📁 Runtime summary: {RUNTIME_CSV}")
