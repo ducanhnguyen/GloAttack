@@ -1,6 +1,6 @@
 import torch
 from src.myutils import (
-    load_image_and_targets, exportImage, compute_map_per_image
+    load_image_and_targets, exportImage, compute_map_per_image, cuda_sync_time
 )
 
 
@@ -9,6 +9,7 @@ def fgsm(model, sample_img_ids, epsilon, csv_writer=None, save_dir="out"):
     FGSM
     """
     success = 0
+    success_times = []
     model_name = model.__class__.__name__
     print(f"🎯 Starting FGSM attack on {model_name} with epsilon={epsilon}")
 
@@ -18,19 +19,22 @@ def fgsm(model, sample_img_ids, epsilon, csv_writer=None, save_dir="out"):
         print(f"Image {img_id} [{idx:2d}/{total_images}]")
 
         try:
-            # === LOAD IMAGE VÀ TARGETS ===
             result = load_image_and_targets(img_id, model)
             if result is None:
                 print(f"Skipping image {img_id}: No valid annotations")
                 continue
             img_tensor, ori_tensor, gt_boxes, gt_classes, targets = result
 
-            # Clone tensor for gradient computation
+            pred_boxes_orig, pred_scores_orig, pred_labels_orig = model.predict(ori_tensor)
+            map_orig = compute_map_per_image(
+                pred_boxes_orig, pred_scores_orig, pred_labels_orig,
+                gt_boxes, gt_classes
+            )
+
+            t0 = cuda_sync_time()
             img_tensor_grad = img_tensor.clone().detach().requires_grad_(True)
 
-            # === MODEL-SPECIFIC LOSS COMPUTATION ===
             try:
-                # Set model to training mode for loss computation
                 if hasattr(model, 'model'):
                     model.model.train()
                 else:
@@ -42,15 +46,12 @@ def fgsm(model, sample_img_ids, epsilon, csv_writer=None, save_dir="out"):
                     print(f"Skipping image {img_id}: Invalid loss")
                     continue
 
-                # Ensure loss requires gradient
                 if not loss.requires_grad:
                     print(f"Loss doesn't require grad for image {img_id}")
                     continue
 
-                # Backward pass
                 loss.backward()
 
-                # Get gradient
                 grad = img_tensor_grad.grad
                 if grad is None:
                     print(f"No gradient computed for image {img_id}")
@@ -60,25 +61,15 @@ def fgsm(model, sample_img_ids, epsilon, csv_writer=None, save_dir="out"):
                 print(f"Error computing gradient for image {img_id}: {e}")
                 continue
 
-            # === CREATE ADVERSARIAL EXAMPLE ===
             adv_tensor = img_tensor + epsilon * grad.sign()
             adv_tensor = torch.clamp(adv_tensor, 0, 1)
+            elapsed = cuda_sync_time() - t0
 
-            # === EVALUATION ===
-            # Set model back to eval mode
             if hasattr(model, 'model'):
                 model.model.eval()
             else:
                 model.eval()
 
-            # Evaluate original image
-            pred_boxes_orig, pred_scores_orig, pred_labels_orig = model.predict(ori_tensor)
-            map_orig = compute_map_per_image(
-                pred_boxes_orig, pred_scores_orig, pred_labels_orig,
-                gt_boxes, gt_classes
-            )
-
-            # Evaluate adversarial image
             pred_boxes_adv, pred_scores_adv, pred_labels_adv = model.predict(adv_tensor)
             map_adv = compute_map_per_image(
                 pred_boxes_adv, pred_scores_adv, pred_labels_adv,
@@ -87,11 +78,9 @@ def fgsm(model, sample_img_ids, epsilon, csv_writer=None, save_dir="out"):
 
             print(f"📊 Image {img_id}: mAP {map_orig:.4f} → {map_adv:.4f}")
 
-            # === EXPORT RESULTS ===
             if map_adv < map_orig:
-                variant_name = f"{model_name}_fgsm_eps{epsilon}_iter{idx}"
+                variant_name = f"{model_name}_fgsm_eps{epsilon}_iter1"
 
-                # Handle potential index out of range in exportImage
                 try:
                     exportImage(ori_tensor, gt_classes, adv_tensor, model,
                                 gt_boxes, img_id, save_dir, map_orig, map_adv,
@@ -99,14 +88,12 @@ def fgsm(model, sample_img_ids, epsilon, csv_writer=None, save_dir="out"):
                                 pred_boxes_adv, pred_scores_adv, pred_labels_adv,
                                 variant_name=variant_name, csv_writer=csv_writer)
                     success += 1
-                    print(f"Attack successful on image {img_id}")
+                    success_times.append(elapsed)
+                    print(f"Attack successful on image {img_id} ({elapsed:.4f}s)")
                 except IndexError as ie:
                     print(f"Export error for image {img_id}: {ie}")
-                    print(f"   Pred labels orig: {pred_labels_orig}")
-                    print(f"   Pred labels adv: {pred_labels_adv}")
-                    print(f"   Model classes: {len(model.names) if hasattr(model, 'names') else 'N/A'}")
-                    # Still count as success but don't export
                     success += 1
+                    success_times.append(elapsed)
             else:
                 print(f"Attack failed on image {img_id}")
 
@@ -116,8 +103,7 @@ def fgsm(model, sample_img_ids, epsilon, csv_writer=None, save_dir="out"):
             traceback.print_exc()
             continue
 
-    # === FINAL STATISTICS ===
     success_rate = (success / len(sample_img_ids)) * 100 if len(sample_img_ids) > 0 else 0
     print(f"📊 FGSM {model_name}: "
           f"Successful attacks: {success}/{len(sample_img_ids)} ({success_rate:.2f}%)")
-    return success
+    return success, success_times

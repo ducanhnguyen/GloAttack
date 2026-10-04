@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from scipy.fftpack import dct, idct
 from src.myutils import (
-    load_image_and_targets, exportImage, compute_map_per_image
+    load_image_and_targets, exportImage, compute_map_per_image, cuda_sync_time
 )
 
 
@@ -24,6 +24,7 @@ def dct_mask(model, sample_img_ids, mask_type='low', eps=16 / 255, iters=10, alp
         save_dir: Directory to save results
     """
     success = 0
+    success_times = []
     print(f"🎯 Starting DCT mask attack with mask_type={mask_type}, eps={eps}, iters={iters}")
     print(f"   Mode: {'Targeted' if targeted else 'Non-targeted'} {attack_mode}")
 
@@ -51,7 +52,7 @@ def dct_mask(model, sample_img_ids, mask_type='low', eps=16 / 255, iters=10, alp
             )
 
             # === DCT Mask Attack theo paper ===
-            # Khởi tạo từ ảnh gốc
+            t0 = cuda_sync_time()
             adv_img = img_tensor.clone().detach()
 
             # Tạo DCT frequency mask một lần (Figure 1)
@@ -121,6 +122,7 @@ def dct_mask(model, sample_img_ids, mask_type='low', eps=16 / 255, iters=10, alp
                     final_iteration = i + 1
                     print(f"Attack successful at iteration {final_iteration}!")
                     break
+            elapsed = cuda_sync_time() - t0
 
             # === FINAL EVALUATION AND EXPORT ===
             if attack_successful:
@@ -139,7 +141,9 @@ def dct_mask(model, sample_img_ids, mask_type='low', eps=16 / 255, iters=10, alp
                             pred_boxes_adv, pred_scores_adv, pred_labels_adv,
                             variant_name=variant_name, csv_writer=csv_writer)
                 success += 1
-                print(f"Attack successful on image {img_id} after {final_iteration} iterations")
+                success_times.append(elapsed)
+                print(f"Attack successful on image {img_id} after {final_iteration} iterations "
+                      f"({elapsed:.4f}s)")
             else:
                 print(f"Attack failed on image {img_id} after {iters} iterations")
 
@@ -154,7 +158,7 @@ def dct_mask(model, sample_img_ids, mask_type='low', eps=16 / 255, iters=10, alp
     mode_str = f"{'Targeted' if targeted else 'Non-targeted'} {attack_mode}"
     print(f"DCT Mask {mask_type} ({mode_str}) {model.__class__.__name__}: "
           f"Successful attacks: {success}/{len(sample_img_ids)} ({success_rate:.2f}%)")
-    return success
+    return success, success_times
 
 
 def create_dct_frequency_mask(H, W, mask_type='low', keep_ratio=0.2):

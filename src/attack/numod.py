@@ -3,7 +3,7 @@ import torch
 import numpy as np
 from scipy.fftpack import dct, idct
 from src.myutils import (
-    load_image_and_targets, exportImage, compute_map_per_image
+    load_image_and_targets, exportImage, compute_map_per_image, cuda_sync_time
 )
 
 
@@ -25,6 +25,7 @@ def numod(model, sample_img_ids, epsilon=0.1, max_iters=50, alpha=0.5, lambda_sf
         save_dir: Directory to save results
     """
     success = 0
+    success_times = []
     print(f"🎯 Starting NumbOD attack with epsilon={epsilon}, max_iters={max_iters}")
 
     total_images = len(sample_img_ids)
@@ -48,7 +49,7 @@ def numod(model, sample_img_ids, epsilon=0.1, max_iters=50, alpha=0.5, lambda_sf
             )
 
             # === NumbOD Attack ===
-            # Initialize perturbation
+            t0 = cuda_sync_time()
             delta = torch.zeros_like(ori_tensor, requires_grad=True, device=ori_tensor.device)
             optimizer = torch.optim.Adam([delta], lr=0.01)
 
@@ -123,6 +124,7 @@ def numod(model, sample_img_ids, epsilon=0.1, max_iters=50, alpha=0.5, lambda_sf
                     final_iteration = step + 1
                     print(f"✅ Attack successful at iteration {final_iteration}!")
                     break
+            elapsed = cuda_sync_time() - t0
 
             # === FINAL EVALUATION AND EXPORT ===
             if attack_successful and best_adv is not None:
@@ -140,7 +142,9 @@ def numod(model, sample_img_ids, epsilon=0.1, max_iters=50, alpha=0.5, lambda_sf
                             pred_boxes_adv, pred_scores_adv, pred_labels_adv,
                             variant_name=variant_name, csv_writer=csv_writer)
                 success += 1
-                print(f"✅ Attack successful on image {img_id} after {final_iteration} iterations")
+                success_times.append(elapsed)
+                print(f"✅ Attack successful on image {img_id} after {final_iteration} iterations "
+                      f"({elapsed:.4f}s)")
             else:
                 print(f"❌ Attack failed on image {img_id} after {max_iters} iterations")
 
@@ -154,7 +158,7 @@ def numod(model, sample_img_ids, epsilon=0.1, max_iters=50, alpha=0.5, lambda_sf
     success_rate = (success / len(sample_img_ids)) * 100 if len(sample_img_ids) > 0 else 0
     print(f"📊 NumbOD {model.__class__.__name__}: "
           f"Successful attacks: {success}/{len(sample_img_ids)} ({success_rate:.2f}%)")
-    return success
+    return success, success_times
 
 
 def dual_track_target_selection(pred_boxes, pred_scores, pred_labels,

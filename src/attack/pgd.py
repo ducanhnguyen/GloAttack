@@ -1,13 +1,14 @@
 # checked
 import torch
 from src.myutils import (
-    load_image_and_targets, exportImage, compute_map_per_image
+    load_image_and_targets, exportImage, compute_map_per_image, cuda_sync_time
 )
 
 
 def pgd(model, sample_img_ids, epsilon=0.03, alpha=0.005, num_iter=10, random_start=True, csv_writer=None,
         save_dir="out"):
     success = 0
+    success_times = []
     print(f"🎯 Starting PGD attack with epsilon={epsilon}, alpha={alpha}, iter={num_iter}")
 
     total_images = len(sample_img_ids)
@@ -30,8 +31,7 @@ def pgd(model, sample_img_ids, epsilon=0.03, alpha=0.005, num_iter=10, random_st
                 gt_boxes, gt_classes
             )
 
-            # === PGD Attack ===
-            # 1. Random initialization (nếu random_start=True)
+            t0 = cuda_sync_time()
             if random_start:
                 # Khởi tạo ngẫu nhiên trong epsilon-ball
                 noise = torch.empty_like(ori_tensor).uniform_(-epsilon, epsilon)
@@ -85,6 +85,7 @@ def pgd(model, sample_img_ids, epsilon=0.03, alpha=0.005, num_iter=10, random_st
                     final_iteration = i + 1
                     print(f"Attack successful at iteration {final_iteration}!")
                     break
+            elapsed = cuda_sync_time() - t0
 
             # === FINAL EVALUATION AND EXPORT ===
             if attack_successful:
@@ -102,7 +103,9 @@ def pgd(model, sample_img_ids, epsilon=0.03, alpha=0.005, num_iter=10, random_st
                             pred_boxes_adv, pred_scores_adv, pred_labels_adv,
                             variant_name=variant_name, csv_writer=csv_writer)
                 success += 1
-                print(f"Attack successful on image {img_id} after {final_iteration} iterations")
+                success_times.append(elapsed)
+                print(f"Attack successful on image {img_id} after {final_iteration} iterations "
+                      f"({elapsed:.4f}s)")
             else:
                 print(f"Attack failed on image {img_id} after {num_iter} iterations")
 
@@ -116,4 +119,4 @@ def pgd(model, sample_img_ids, epsilon=0.03, alpha=0.005, num_iter=10, random_st
     success_rate = (success / len(sample_img_ids)) * 100 if len(sample_img_ids) > 0 else 0
     print(f"PGD {model.__class__.__name__}: "
           f"Successful attacks: {success}/{len(sample_img_ids)} ({success_rate:.2f}%)")
-    return success
+    return success, success_times

@@ -11,7 +11,8 @@ import math
 from src.attack.myconfig import ZERO_ATTACK
 
 from src.myutils import (
-    load_image_and_targets, exportImage, compute_map_per_image, is_prediction_correct
+    load_image_and_targets, exportImage, compute_map_per_image, is_prediction_correct,
+    cuda_sync_time,
 )
 
 
@@ -31,6 +32,7 @@ def gloattack(model,
 
 
     success = 0
+    success_times = []
     print(f"🎯 Starting GloAttack attack with epsilon={epsilon}, max_iters={max_iters}")
 
     # 🆕 Tạo thư mục lưu noise data
@@ -101,7 +103,9 @@ def gloattack(model,
 
             attack_successful = False
             final_iteration = 0
+            collect_noise = exportFrequencyNoiseData or visualize_frequency
 
+            t0 = cuda_sync_time()
             for step in range(max_iters):
                 Xf_shifted_before = Xf_shifted.detach().clone()
 
@@ -129,65 +133,57 @@ def gloattack(model,
                 x_adv = torch.fft.ifft2(torch.fft.ifftshift(Xf_shifted)).real
                 x_adv = torch.clamp(x_adv, 0, 1)
 
-                # 🆕 Thu thập dữ liệu nhiễu tần số cho iteration này
-                current_freq_domain = Xf_shifted.detach().clone()
-                current_magnitude = torch.abs(current_freq_domain)
-                current_phase = torch.angle(current_freq_domain)
+                if collect_noise:
+                    current_freq_domain = Xf_shifted.detach().clone()
+                    current_magnitude = torch.abs(current_freq_domain)
+                    current_phase = torch.angle(current_freq_domain)
 
-                # Tính nhiễu theo yêu cầu - cả Sum và L2 distance
-                # Frequency domain noise
-                freq_domain_diff = current_freq_domain - original_freq_domain
-                freq_domain_noise_sum = torch.sum(torch.abs(freq_domain_diff)).item()  # Sum of absolute differences
-                freq_domain_noise_l2 = torch.norm(freq_domain_diff).item()  # L2: Euclidean distance
+                    freq_domain_diff = current_freq_domain - original_freq_domain
+                    freq_domain_noise_sum = torch.sum(torch.abs(freq_domain_diff)).item()
+                    freq_domain_noise_l2 = torch.norm(freq_domain_diff).item()
 
-                # Magnitude noise
-                magnitude_diff = current_magnitude - original_magnitude
-                magnitude_noise_sum = torch.sum(torch.abs(magnitude_diff)).item()
-                magnitude_noise_l2 = torch.norm(magnitude_diff).item()
+                    magnitude_diff = current_magnitude - original_magnitude
+                    magnitude_noise_sum = torch.sum(torch.abs(magnitude_diff)).item()
+                    magnitude_noise_l2 = torch.norm(magnitude_diff).item()
 
-                # Phase noise (xử lý wrap-around cho phase)
-                phase_diff = current_phase - original_phase
-                phase_diff = torch.atan2(torch.sin(phase_diff), torch.cos(phase_diff))  # Wrap to [-π, π]
-                phase_noise_sum = torch.sum(torch.abs(phase_diff)).item()
-                phase_noise_l2 = torch.norm(phase_diff).item()
+                    phase_diff = current_phase - original_phase
+                    phase_diff = torch.atan2(torch.sin(phase_diff), torch.cos(phase_diff))
+                    phase_noise_sum = torch.sum(torch.abs(phase_diff)).item()
+                    phase_noise_l2 = torch.norm(phase_diff).item()
 
-                # 🆕 LFC và HFC noise (Low/High Frequency Components)
-                # Tạo masks để tách LFC và HFC từ magnitude
-                h, w = current_magnitude.shape[-2:]
-                center_h, center_w = h // 2, w // 2
-                y, x = torch.meshgrid(torch.arange(h), torch.arange(w), indexing='ij')
-                y, x = y.to(current_magnitude.device), x.to(current_magnitude.device)
-                distance = torch.sqrt((y - center_h) ** 2 + (x - center_w) ** 2)
-                max_distance = min(center_h, center_w)
-                threshold_distance = 0.3 * max_distance  # Sử dụng ngưỡng 0.3 như đã thảo luận
+                    h, w = current_magnitude.shape[-2:]
+                    center_h, center_w = h // 2, w // 2
+                    y, x = torch.meshgrid(torch.arange(h), torch.arange(w), indexing='ij')
+                    y, x = y.to(current_magnitude.device), x.to(current_magnitude.device)
+                    distance = torch.sqrt((y - center_h) ** 2 + (x - center_w) ** 2)
+                    max_distance = min(center_h, center_w)
+                    threshold_distance = 0.3 * max_distance
 
-                # Low Frequency Components (LFC) - gần tâm
-                lfc_mask = distance <= threshold_distance
-                lfc_magnitude_diff = magnitude_diff * lfc_mask.float()
-                lfc_noise_sum = torch.sum(torch.abs(lfc_magnitude_diff)).item()
-                lfc_noise_l2 = torch.norm(lfc_magnitude_diff).item()
+                    lfc_mask = distance <= threshold_distance
+                    lfc_magnitude_diff = magnitude_diff * lfc_mask.float()
+                    lfc_noise_sum = torch.sum(torch.abs(lfc_magnitude_diff)).item()
+                    lfc_noise_l2 = torch.norm(lfc_magnitude_diff).item()
 
-                # High Frequency Components (HFC) - xa tâm
-                hfc_mask = distance > threshold_distance
-                hfc_magnitude_diff = magnitude_diff * hfc_mask.float()
-                hfc_noise_sum = torch.sum(torch.abs(hfc_magnitude_diff)).item()
-                hfc_noise_l2 = torch.norm(hfc_magnitude_diff).item()
+                    hfc_mask = distance > threshold_distance
+                    hfc_magnitude_diff = magnitude_diff * hfc_mask.float()
+                    hfc_noise_sum = torch.sum(torch.abs(hfc_magnitude_diff)).item()
+                    hfc_noise_l2 = torch.norm(hfc_magnitude_diff).item()
 
-                iteration_noise_data = {
-                    'step': step,
-                    'freq_domain_noise_sum': freq_domain_noise_sum,
-                    'freq_domain_noise_l2': freq_domain_noise_l2,
-                    'magnitude_noise_sum': magnitude_noise_sum,
-                    'magnitude_noise_l2': magnitude_noise_l2,
-                    'phase_noise_sum': phase_noise_sum,
-                    'phase_noise_l2': phase_noise_l2,
-                    'lfc_noise_sum': lfc_noise_sum,
-                    'lfc_noise_l2': lfc_noise_l2,
-                    'hfc_noise_sum': hfc_noise_sum,
-                    'hfc_noise_l2': hfc_noise_l2,
-                    'map_adv': None  # Sẽ được cập nhật sau
-                }
-                frequency_noise_data['iterations'].append(iteration_noise_data)
+                    iteration_noise_data = {
+                        'step': step,
+                        'freq_domain_noise_sum': freq_domain_noise_sum,
+                        'freq_domain_noise_l2': freq_domain_noise_l2,
+                        'magnitude_noise_sum': magnitude_noise_sum,
+                        'magnitude_noise_l2': magnitude_noise_l2,
+                        'phase_noise_sum': phase_noise_sum,
+                        'phase_noise_l2': phase_noise_l2,
+                        'lfc_noise_sum': lfc_noise_sum,
+                        'lfc_noise_l2': lfc_noise_l2,
+                        'hfc_noise_sum': hfc_noise_sum,
+                        'hfc_noise_l2': hfc_noise_l2,
+                        'map_adv': None
+                    }
+                    frequency_noise_data['iterations'].append(iteration_noise_data)
 
                 if (step + 1) % interval == 0 or step == max_iters - 1:
                     x_adv_quantized = torch.round(x_adv * 255) / 255
@@ -199,7 +195,8 @@ def gloattack(model,
                         gt_boxes, gt_classes
                     )
 
-                    frequency_noise_data['iterations'][-1]['map_adv'] = map_adv
+                    if collect_noise:
+                        frequency_noise_data['iterations'][-1]['map_adv'] = map_adv
 
                     # === Thu thập dữ liệu cho evolution visualization
                     if visualize_frequency:
@@ -231,6 +228,7 @@ def gloattack(model,
                         frequency_noise_data['final_iteration'] = final_iteration
                         print(f"✅ Attack successful at iteration {final_iteration}!")
                         break
+            elapsed = cuda_sync_time() - t0
 
             # === FINAL EVALUATION AND EXPORT ===
             if attack_successful:
@@ -245,7 +243,9 @@ def gloattack(model,
                             exportAdvFolder=exportAdvFolder,
                             )
                 success += 1
-                print(f"✅ Attack successful on image {img_id} after {final_iteration} iterations")
+                success_times.append(elapsed)
+                print(f"✅ Attack successful on image {img_id} after {final_iteration} iterations "
+                      f"({elapsed:.4f}s)")
 
                 if exportFrequencyNoiseData:
                     save_frequency_noise_data(frequency_noise_data, noise_dir)
@@ -268,7 +268,7 @@ def gloattack(model,
     success_rate = (success / len(sample_img_ids)) * 100 if len(sample_img_ids) > 0 else 0
     print(f"📊 GloAttack {model.__class__.__name__}: "
           f"Successful attacks: {success}/{len(sample_img_ids)} ({success_rate:.2f}%)")
-    return success
+    return success, success_times
 
 def save_frequency_noise_data(frequency_noise_data, noise_dir):
     img_id = frequency_noise_data['img_id']
