@@ -129,8 +129,7 @@ def numod(model, sample_img_ids, epsilon=0.1, max_iters=50, alpha=0.5, lambda_sf
                     print(f"✅ Attack successful at iteration {final_iteration}!")
                     break
             elapsed = cuda_sync_time() - t0
-            if not loss_invalid:
-                attack_times.append(elapsed)     # cả thành công lẫn thất bại
+            attack_times.append(elapsed)         # cả thành công lẫn thất bại
                 
             # === FINAL EVALUATION AND EXPORT ===
             if attack_successful and best_adv is not None:
