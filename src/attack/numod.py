@@ -25,7 +25,7 @@ def numod(model, sample_img_ids, epsilon=0.1, max_iters=50, alpha=0.5, lambda_sf
         save_dir: Directory to save results
     """
     success = 0
-    success_times = []
+    attack_times = []          # thay cho success_times = []
     print(f"🎯 Starting NumbOD attack with epsilon={epsilon}, max_iters={max_iters}")
 
     total_images = len(sample_img_ids)
@@ -47,6 +47,10 @@ def numod(model, sample_img_ids, epsilon=0.1, max_iters=50, alpha=0.5, lambda_sf
                 pred_boxes_orig, pred_scores_orig, pred_labels_orig,
                 gt_boxes, gt_classes
             )
+
+            if map_orig == 0.0:
+                print(f"⚠️ Skipping image {img_id}: original mAP = 0")
+                continue
 
             # === NumbOD Attack ===
             t0 = cuda_sync_time()
@@ -125,7 +129,9 @@ def numod(model, sample_img_ids, epsilon=0.1, max_iters=50, alpha=0.5, lambda_sf
                     print(f"✅ Attack successful at iteration {final_iteration}!")
                     break
             elapsed = cuda_sync_time() - t0
-
+            if not loss_invalid:
+                attack_times.append(elapsed)     # cả thành công lẫn thất bại
+                
             # === FINAL EVALUATION AND EXPORT ===
             if attack_successful and best_adv is not None:
                 # Get final predictions for export
@@ -142,7 +148,7 @@ def numod(model, sample_img_ids, epsilon=0.1, max_iters=50, alpha=0.5, lambda_sf
                             pred_boxes_adv, pred_scores_adv, pred_labels_adv,
                             variant_name=variant_name, csv_writer=csv_writer)
                 success += 1
-                success_times.append(elapsed)
+                # success_times.append(elapsed)
                 print(f"✅ Attack successful on image {img_id} after {final_iteration} iterations "
                       f"({elapsed:.4f}s)")
             else:
@@ -158,7 +164,7 @@ def numod(model, sample_img_ids, epsilon=0.1, max_iters=50, alpha=0.5, lambda_sf
     success_rate = (success / len(sample_img_ids)) * 100 if len(sample_img_ids) > 0 else 0
     print(f"📊 NumbOD {model.__class__.__name__}: "
           f"Successful attacks: {success}/{len(sample_img_ids)} ({success_rate:.2f}%)")
-    return success, success_times
+    return success, attack_times
 
 
 def dual_track_target_selection(pred_boxes, pred_scores, pred_labels,

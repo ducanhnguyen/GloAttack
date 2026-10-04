@@ -2,7 +2,7 @@ import torch
 from advdrop.compression import rgb_to_ycbcr_jpeg, chroma_subsampling, block_splitting, dct_8x8, quantize
 from advdrop.decompression import dequantize, idct_8x8, block_merging, chroma_upsampling, ycbcr_to_rgb_jpeg
 from src.myutils import (
-    load_image_and_targets, exportImage, compute_map_per_image
+    load_image_and_targets, exportImage, compute_map_per_image, cuda_sync_time
 )
 
 
@@ -12,6 +12,7 @@ def advdrop(model, sample_img_ids, q_size=10, max_iters=10, alpha_init=0.5, alph
     AdvDrop attack với gradient flow đúng và interface đa hình
     """
     success = 0
+    attack_times = []
     print(f"🎯 Starting AdvDrop attack with q_size={q_size}, max_iters={max_iters}")
 
     total_images = len(sample_img_ids)
@@ -33,11 +34,17 @@ def advdrop(model, sample_img_ids, q_size=10, max_iters=10, alpha_init=0.5, alph
                 pred_boxes_orig, pred_scores_orig, pred_labels_orig,
                 gt_boxes, gt_classes
             )
+            
+            if map_orig == 0.0:
+                print(f"⚠️ Skipping image {img_id}: original mAP = 0")
+                continue
 
             # === AdvDrop Attack ===
             attack_successful = False
+            loss_invalid = False                       # thêm
             final_iteration = 0
-
+            
+            t0 = cuda_sync_time()                      # thêm
             # Prepare frequency domain components
             comps = prepare_ycbcr_blocks(img_tensor)
             q_tables = {}
@@ -72,6 +79,7 @@ def advdrop(model, sample_img_ids, q_size=10, max_iters=10, alpha_init=0.5, alph
 
                 if loss is None or not isinstance(loss, torch.Tensor):
                     print(f"⚠️ Skipping iteration {step} for image {img_id}: Invalid loss")
+                    loss_invalid = True                  # thêm
                     break
 
                 loss.backward(retain_graph=True)
@@ -98,6 +106,10 @@ def advdrop(model, sample_img_ids, q_size=10, max_iters=10, alpha_init=0.5, alph
                     print(f"✅ Attack successful at iteration {final_iteration}!")
                     break
 
+            elapsed = cuda_sync_time() - t0      # thêm
+            if not loss_invalid:
+                attack_times.append(elapsed)     # cả thành công lẫn thất bại
+                
             # === FINAL EVALUATION AND EXPORT ===
             if attack_successful:
                 # Get final predictions for export
@@ -128,7 +140,7 @@ def advdrop(model, sample_img_ids, q_size=10, max_iters=10, alpha_init=0.5, alph
     success_rate = (success / len(sample_img_ids)) * 100 if len(sample_img_ids) > 0 else 0
     print(f"📊 AdvDrop {model.__class__.__name__}: "
           f"Successful attacks: {success}/{len(sample_img_ids)} ({success_rate:.2f}%)")
-    return success
+    return success, attack_times
 
 
 @torch.no_grad()

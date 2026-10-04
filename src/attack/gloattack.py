@@ -33,8 +33,9 @@ def gloattack(model,
 
     success = 0
     success_times = []
+    attack_times = []
     print(f"🎯 Starting GloAttack attack with epsilon={epsilon}, max_iters={max_iters}")
-
+    times = []
     # 🆕 Tạo thư mục lưu noise data
     if exportFrequencyNoiseData:
         noise_dir = os.path.join(save_dir, "frequency_noise_data")
@@ -102,6 +103,7 @@ def gloattack(model,
             original_phase = torch.angle(original_freq_domain)
 
             attack_successful = False
+            loss_invalid = False
             final_iteration = 0
             collect_noise = exportFrequencyNoiseData or visualize_frequency
 
@@ -118,6 +120,7 @@ def gloattack(model,
 
                 if loss is None or not isinstance(loss, torch.Tensor):
                     print(f"⚠️ Skipping iteration {step} for image {img_id}: Invalid loss")
+                    loss_invalid = True          # thêmprint(f"⚠️ Skipping iteration {step} for image {img_id}: Invalid loss")
                     break
 
                 loss.backward()
@@ -229,6 +232,9 @@ def gloattack(model,
                         print(f"✅ Attack successful at iteration {final_iteration}!")
                         break
             elapsed = cuda_sync_time() - t0
+            if not loss_invalid:
+                attack_times.append(elapsed)     # cả thành công lẫn thất bại
+
 
             # === FINAL EVALUATION AND EXPORT ===
             if attack_successful:
@@ -243,7 +249,7 @@ def gloattack(model,
                             exportAdvFolder=exportAdvFolder,
                             )
                 success += 1
-                success_times.append(elapsed)
+                # success_times.append(elapsed)
                 print(f"✅ Attack successful on image {img_id} after {final_iteration} iterations "
                       f"({elapsed:.4f}s)")
 
@@ -268,7 +274,7 @@ def gloattack(model,
     success_rate = (success / len(sample_img_ids)) * 100 if len(sample_img_ids) > 0 else 0
     print(f"📊 GloAttack {model.__class__.__name__}: "
           f"Successful attacks: {success}/{len(sample_img_ids)} ({success_rate:.2f}%)")
-    return success, success_times
+    return success, attack_times
 
 def save_frequency_noise_data(frequency_noise_data, noise_dir):
     img_id = frequency_noise_data['img_id']

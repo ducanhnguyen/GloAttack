@@ -7,9 +7,15 @@ from src.myutils import (
 def fgsm(model, sample_img_ids, epsilon, csv_writer=None, save_dir="out"):
     """
     FGSM
+
+    Returns:
+        success: số ảnh attack thành công
+        attack_times: thời gian (giây) attack của MỌI ảnh đã chạy attack
+                      (cả thành công lẫn thất bại), tính từ lúc bắt đầu
+                      đến khi kiểm tra xong kết quả.
     """
     success = 0
-    success_times = []
+    attack_times = []
     model_name = model.__class__.__name__
     print(f"🎯 Starting FGSM attack on {model_name} with epsilon={epsilon}")
 
@@ -31,6 +37,12 @@ def fgsm(model, sample_img_ids, epsilon, csv_writer=None, save_dir="out"):
                 gt_boxes, gt_classes
             )
 
+            # Đồng nhất với GloAttack: ảnh mAP gốc = 0 không được attack, không tính thời gian
+            if map_orig == 0.0:
+                print(f"⚠️ Skipping image {img_id}: original mAP = 0")
+                continue
+
+            # ===== BẮT ĐẦU ĐO THỜI GIAN =====
             t0 = cuda_sync_time()
             img_tensor_grad = img_tensor.clone().detach().requires_grad_(True)
 
@@ -61,20 +73,26 @@ def fgsm(model, sample_img_ids, epsilon, csv_writer=None, save_dir="out"):
                 print(f"Error computing gradient for image {img_id}: {e}")
                 continue
 
+            finally:
+                # Luôn trả model về eval, kể cả khi continue/lỗi
+                if hasattr(model, 'model'):
+                    model.model.eval()
+                else:
+                    model.eval()
+
             adv_tensor = img_tensor + epsilon * grad.sign()
             adv_tensor = torch.clamp(adv_tensor, 0, 1)
-            elapsed = cuda_sync_time() - t0
 
-            if hasattr(model, 'model'):
-                model.model.eval()
-            else:
-                model.eval()
-
+            # Kiểm tra thành công (tính vào thời gian, giống GloAttack)
             pred_boxes_adv, pred_scores_adv, pred_labels_adv = model.predict(adv_tensor)
             map_adv = compute_map_per_image(
                 pred_boxes_adv, pred_scores_adv, pred_labels_adv,
                 gt_boxes, gt_classes
             )
+
+            elapsed = cuda_sync_time() - t0
+            attack_times.append(elapsed)          # cả thành công lẫn thất bại
+            # ===== KẾT THÚC ĐO THỜI GIAN =====
 
             print(f"📊 Image {img_id}: mAP {map_orig:.4f} → {map_adv:.4f}")
 
@@ -88,14 +106,12 @@ def fgsm(model, sample_img_ids, epsilon, csv_writer=None, save_dir="out"):
                                 pred_boxes_adv, pred_scores_adv, pred_labels_adv,
                                 variant_name=variant_name, csv_writer=csv_writer)
                     success += 1
-                    success_times.append(elapsed)
-                    print(f"Attack successful on image {img_id} ({elapsed:.4f}s)")
+                    print(f"✅ Attack successful on image {img_id} ({elapsed:.4f}s)")
                 except IndexError as ie:
                     print(f"Export error for image {img_id}: {ie}")
                     success += 1
-                    success_times.append(elapsed)
             else:
-                print(f"Attack failed on image {img_id}")
+                print(f"❌ Attack failed on image {img_id} ({elapsed:.4f}s)")
 
         except Exception as e:
             print(f"Error attacking image {img_id}: {e}")
@@ -104,6 +120,8 @@ def fgsm(model, sample_img_ids, epsilon, csv_writer=None, save_dir="out"):
             continue
 
     success_rate = (success / len(sample_img_ids)) * 100 if len(sample_img_ids) > 0 else 0
+    mean_t = sum(attack_times) / len(attack_times) if attack_times else 0.0
     print(f"📊 FGSM {model_name}: "
-          f"Successful attacks: {success}/{len(sample_img_ids)} ({success_rate:.2f}%)")
-    return success, success_times
+          f"Successful attacks: {success}/{len(sample_img_ids)} ({success_rate:.2f}%), "
+          f"mean time (all attacked images) = {mean_t:.4f}s")
+    return success, attack_times
