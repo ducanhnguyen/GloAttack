@@ -28,7 +28,7 @@ DETR_RESNET50_DC5 = "detr-resnet-50-dc5" # facebook/detr-resnet-50-dc5
 RUN_ALL_MODELS = True
 MODEL_TYPE = YOLOV5L
 
-NUM_IMAGE = 10
+NUM_IMAGE = 30
 SAVE_DIR = "out"
 IMAGE_LIST_DIR = "result/rq1/1k images"
 RUNTIME_CSV = "result/rq1/runtime_until_success.csv"
@@ -48,7 +48,7 @@ RUN_NUMOD = True
 RUN_PGD = True
 
 GLOATTACK_CONFIGS = [
-    {'epsilon': 0.09, 'max_iters': 1000, 'interval': 1},
+    {'epsilon': 0.09, 'max_iters': 500, 'interval': 1},
 ]
 
 DCT_EPS = 0.0627
