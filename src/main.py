@@ -401,7 +401,7 @@ if __name__ == '__main__':
                 eps = config['eps']
                 iters = config['iters']
                 print(f"\n⚡ Running DCT Mask with {mask_type} frequency, eps={eps}")
-                current_save_dir = f"{SAVE_DIR}/{model_type}_dct_{mask_type}_eps{ep:.4f}_iter{iters}"
+                current_save_dir = f"{SAVE_DIR}/{model_type}_dct_{mask_type}_eps{eps:.4f}_iter{iters}"
                 csv_path, csv_file, csv_writer = open_attack_csv(current_save_dir)
                 success, times = dct_mask(
                     model, sample_img_ids, mask_type=mask_type, eps=eps, iters=iters,
